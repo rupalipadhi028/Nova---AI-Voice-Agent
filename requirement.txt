@@ -1,0 +1,5 @@
+SpeechRecognition
+sounddevice
+soundfile
+pyttsx3
+ollama
