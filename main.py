@@ -13,6 +13,7 @@ import soundfile as sf
 import speech_recognition as sr
 from ollama import chat
 import yt_dlp
+from ddgs import DDGS
 
 
 ASSISTANT_NAME = "nova"
@@ -20,6 +21,8 @@ MODEL_NAME = "llama3.2"
 SAMPLE_RATE = 16000
 LISTEN_DURATION = 7
 LAST_YOUTUBE_RESULTS = []
+LAST_WEB_RESULTS = []
+LAST_SEARCH_TYPE = None
 
 def speak(message):
     """Speak every response using the built-in Windows SAPI voice."""
@@ -133,12 +136,31 @@ def open_website(name, url):
     webbrowser.open(url)
 
 
+def get_web_results(query):
+    """Return up to five normal web links for a search request."""
+    try:
+        results = DDGS().text(query, max_results=5)
+        return [
+            {"title": item["title"], "url": item["href"]}
+            for item in results
+            if item.get("title") and item.get("href")
+        ]
+    except Exception as error:
+        print(f"Web lookup error: {error}")
+        return []
+
+
 def google_search(query):
+    global LAST_WEB_RESULTS, LAST_SEARCH_TYPE
     if not query:
         speak("What would you like me to search for?")
         return
     speak(f"Sure. I am searching Google for {query} now.")  # Spoken BEFORE the task.
+    LAST_WEB_RESULTS = get_web_results(query)
+    LAST_SEARCH_TYPE = "web"
     webbrowser.open("https://www.google.com/search?q=" + query.replace(" ", "+"))
+    if LAST_WEB_RESULTS:
+        speak("I found some links. Say open that link, or say open link number one, two, three, four, or five.")
 
 
 def get_youtube_results(query):
@@ -163,12 +185,13 @@ def get_youtube_results(query):
 
 def youtube_search(query):
     """Search YouTube and remember the links Nova found."""
-    global LAST_YOUTUBE_RESULTS
+    global LAST_YOUTUBE_RESULTS, LAST_SEARCH_TYPE
     if not query:
         speak("What would you like me to search for on YouTube?")
         return
     speak(f"Sure. I am searching YouTube for {query} now.")
     LAST_YOUTUBE_RESULTS = get_youtube_results(query)
+    LAST_SEARCH_TYPE = "youtube"
     webbrowser.open("https://www.youtube.com/results?search_query=" + quote_plus(query))
     if LAST_YOUTUBE_RESULTS:
         speak("I found some results. Say open that link, or say open link number one, two, three, four, or five.")
@@ -188,16 +211,43 @@ def open_youtube_result(number=1, autoplay=False):
     webbrowser.open(result["url"] + suffix)
 
 
+def open_web_result(number=1):
+    """Open one of the links from Nova's latest regular web search."""
+    if not LAST_WEB_RESULTS:
+        speak("I do not have a recent web search. Please search for something first.")
+        return
+    if number < 1 or number > len(LAST_WEB_RESULTS):
+        speak(f"I found only {len(LAST_WEB_RESULTS)} links. Please choose one of them.")
+        return
+    result = LAST_WEB_RESULTS[number - 1]
+    speak(f"Sure. I am opening {result['title']} now.")
+    webbrowser.open(result["url"])
+
+
 def play_youtube(query):
     """Find the first YouTube video for the request and open it with autoplay."""
-    global LAST_YOUTUBE_RESULTS
+    global LAST_YOUTUBE_RESULTS, LAST_SEARCH_TYPE
     speak(f"Sure. I am finding and playing {query} on YouTube now.")
     LAST_YOUTUBE_RESULTS = get_youtube_results(query)
+    LAST_SEARCH_TYPE = "youtube"
     if LAST_YOUTUBE_RESULTS:
         open_youtube_result(1, autoplay=True)
     else:
         speak("I could not choose a video automatically, so I am opening YouTube search results.")
         webbrowser.open("https://www.youtube.com/results?search_query=" + quote_plus(query))
+
+
+def clean_youtube_play_request(request):
+    """Keep only the title/topic from natural spoken YouTube requests."""
+    request = request.strip()
+    request = re.sub(
+        r"^(?:the\s+|a\s+)?(?:song|video)(?:\s+(?:called|named|with the name))?\s+",
+        "",
+        request,
+        flags=re.IGNORECASE,
+    )
+    request = re.sub(r"\s+(?:on|from)\s+youtube$", "", request, flags=re.IGNORECASE)
+    return request.strip()
 
 
 def close_all_browsers():
@@ -227,6 +277,17 @@ def requested_link_number(command):
         "third": 3, "four": 4, "fourth": 4, "five": 5, "fifth": 5,
     }
     return next((number for word, number in words.items() if word in command), 1)
+
+
+def open_last_search_result(command):
+    """Open a link from Nova's most recent YouTube or normal web search."""
+    number = requested_link_number(command)
+    if LAST_SEARCH_TYPE == "youtube":
+        open_youtube_result(number)
+    elif LAST_SEARCH_TYPE == "web":
+        open_web_result(number)
+    else:
+        speak("Please search for something first, then ask me to open a link.")
 
 
 def process_command(command):
@@ -263,7 +324,7 @@ def process_command(command):
     elif "open google" in command:
         open_website("Google", "https://www.google.com")
     elif any(phrase in command for phrase in ("open that link", "open first link", "open second link", "open third link", "open fourth link", "open fifth link", "open link number", "open link 1", "open link 2", "open link 3", "open link 4", "open link 5")):
-        open_youtube_result(requested_link_number(command))
+        open_last_search_result(command)
     elif "open youtube" in command:
         open_website("YouTube", "https://www.youtube.com")
     elif command.startswith("search youtube for "):
@@ -271,12 +332,16 @@ def process_command(command):
     elif command.startswith("search youtube "):
         youtube_search(command.split("search youtube", 1)[1].strip())
     elif command.startswith("play "):
-        play_youtube(command.split("play", 1)[1].strip())
+        query = clean_youtube_play_request(command.split("play", 1)[1])
+        if query:
+            play_youtube(query)
+        else:
+            speak("What song or video would you like me to play on YouTube?")
     elif "close youtube" in command:
         close_all_browsers()
     elif "open github" in command:
         open_website("GitHub", "https://github.com")
-    elif "close browser" in command or "close google" in command or "close github" in command:
+    elif "close browser" in command or "close all tabs" in command or "close google" in command or "close github" in command:
         close_all_browsers()
     elif "search for" in command:
         google_search(command.split("search for", 1)[1].strip())
